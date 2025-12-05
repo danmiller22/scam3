@@ -1,14 +1,19 @@
 import { Bot, InlineKeyboard, webhookCallback } from "https://deno.land/x/grammy/mod.ts";
 
 const paymentTextEnv = Deno.env.get("PAYMENT_TEXT") ??
-  "Оплатите доступ к номеру телефона по указанным реквизитам и нажмите кнопку \"Я оплатил\".";
+  'Оплатите доступ к номеру телефона по указанным реквизитам и нажмите кнопку "Я оплатил".';
 
 const token = Deno.env.get("BOT_TOKEN");
 const closedChatIdEnv = Deno.env.get("CLOSED_CHAT_ID");
 const publicChannelIdEnv = Deno.env.get("PUBLIC_CHANNEL_ID");
 
-// Проверяем, все ли env заданы
+// Проверка env
 const envOk = !!token && !!closedChatIdEnv && !!publicChannelIdEnv;
+
+console.log("=== BOT START ===");
+console.log("env BOT_TOKEN set:", !!token);
+console.log("env CLOSED_CHAT_ID:", closedChatIdEnv);
+console.log("env PUBLIC_CHANNEL_ID:", publicChannelIdEnv);
 
 if (!envOk) {
   console.error(
@@ -16,7 +21,7 @@ if (!envOk) {
   );
 }
 
-// --- утилиты работы с телефонами ---
+// --- работа с телефонами ---
 
 function normalizePhones(text: string): string[] {
   const phones = new Set<string>();
@@ -36,7 +41,6 @@ function stripPhones(text: string): string {
   return text.replace(regex, "[номер скрыт]");
 }
 
-// Упаковываем телефоны в callback_data (ограничение Telegram 64 байта)
 function buildPayload(type: "PAY" | "PAID", phones: string[]): string {
   const base = phones.join(",");
   const encoded = btoa(base);
@@ -61,7 +65,6 @@ function parsePayload(
   }
 }
 
-// handler для Deno.serve – либо реальный бот, либо заглушка
 let handleUpdate: (req: Request) => Promise<Response> | Response;
 
 if (envOk) {
@@ -70,16 +73,42 @@ if (envOk) {
 
   const bot = new Bot(token!);
 
-  // Ловим сообщения в закрытой группе
+  // Логируем каждый апдейт с message
   bot.on("message", async (ctx) => {
     const msg = ctx.message;
-    if (!msg || msg.chat.id !== CLOSED_CHAT_ID) return;
+    if (!msg) return;
+
+    const txt = msg.text ?? msg.caption ?? "";
+    console.log("Incoming message:", {
+      chat_id: msg.chat.id.toString(),
+      chat_type: msg.chat.type,
+      from: msg.from?.id,
+      text_preview: txt.slice(0, 80),
+    });
+
+    if (msg.chat.id !== CLOSED_CHAT_ID) {
+      console.log(
+        "Skip message: chat_id != CLOSED_CHAT_ID",
+        msg.chat.id.toString(),
+        "!=",
+        CLOSED_CHAT_ID.toString(),
+      );
+      return;
+    }
 
     const text = msg.text ?? msg.caption;
-    if (!text) return;
+    if (!text) {
+      console.log("Skip: no text/caption in message from closed chat");
+      return;
+    }
 
     const phones = normalizePhones(text);
-    if (phones.length === 0) return;
+    console.log("Phones found:", phones);
+
+    if (phones.length === 0) {
+      console.log("Skip: no phones in message");
+      return;
+    }
 
     const sanitized = stripPhones(text);
     const kb = new InlineKeyboard().text(
@@ -87,25 +116,31 @@ if (envOk) {
       buildPayload("PAY", phones),
     );
 
-    // Текстовое объявление
-    if (msg.text) {
-      await ctx.api.sendMessage(PUBLIC_CHANNEL_ID, sanitized, {
-        reply_markup: kb,
-      });
-    }
-    // Фото + подпись
-    else if (msg.photo && msg.photo.length > 0) {
-      const photo = msg.photo[msg.photo.length - 1];
-      await ctx.api.sendPhoto(PUBLIC_CHANNEL_ID, photo.file_id, {
-        caption: sanitized,
-        reply_markup: kb,
-      });
+    try {
+      if (msg.text) {
+        await ctx.api.sendMessage(PUBLIC_CHANNEL_ID, sanitized, {
+          reply_markup: kb,
+        });
+        console.log("Sent text ad to public channel");
+      } else if (msg.photo && msg.photo.length > 0) {
+        const photo = msg.photo[msg.photo.length - 1];
+        await ctx.api.sendPhoto(PUBLIC_CHANNEL_ID, photo.file_id, {
+          caption: sanitized,
+          reply_markup: kb,
+        });
+        console.log("Sent photo ad to public channel");
+      } else {
+        console.log("Skip: unsupported message type in closed chat");
+      }
+    } catch (err) {
+      console.error("Error sending ad to public channel:", err);
     }
   });
 
-  // Нажатия на кнопки
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+    console.log("Callback data:", data);
+
     const payload = parsePayload(data);
     if (!payload) {
       await ctx.answerCallbackQuery({
@@ -125,7 +160,6 @@ if (envOk) {
     }
 
     if (payload.type === "PAY") {
-      // Отправляем инструкции по оплате в личку
       try {
         const kb = new InlineKeyboard().text(
           "Я оплатил",
@@ -135,7 +169,7 @@ if (envOk) {
         await ctx.api.sendMessage(
           userId,
           paymentTextEnv +
-            "\n\nПосле оплаты нажмите кнопку \"Я оплатил\", и бот вышлет вам номер телефона.",
+            '\n\nПосле оплаты нажмите кнопку "Я оплатил", и бот вышлет вам номер телефона.',
           { reply_markup: kb },
         );
 
@@ -150,7 +184,6 @@ if (envOk) {
         });
       }
     } else if (payload.type === "PAID") {
-      // Отправляем номера
       const phonesText = payload.phones.join("\n");
       await ctx.api.sendMessage(
         userId,
@@ -166,7 +199,6 @@ if (envOk) {
   const grammyHandler = webhookCallback(bot, "std/http");
   handleUpdate = (req: Request) => grammyHandler(req);
 } else {
-  // Если env нет – деплой не падает, просто заглушка
   handleUpdate = async (_req: Request) =>
     new Response(
       "Bot is not configured. Missing BOT_TOKEN, CLOSED_CHAT_ID or PUBLIC_CHANNEL_ID.",
@@ -174,7 +206,6 @@ if (envOk) {
     );
 }
 
-// HTTP-сервер для Deno Deploy
 Deno.serve(async (req: Request) => {
   if (req.method === "POST") {
     const url = new URL(req.url);

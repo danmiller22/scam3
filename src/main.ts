@@ -65,6 +65,68 @@ function parsePayload(
   }
 }
 
+// Универсальная обработка объявления (для групп и каналов)
+async function handleAd(msg: any, ctx: any, CLOSED_CHAT_ID: bigint, PUBLIC_CHANNEL_ID: bigint) {
+  if (!msg) return;
+
+  const text = msg.text ?? msg.caption ?? "";
+  console.log("Incoming:", {
+    chat_id: msg.chat?.id?.toString(),
+    chat_type: msg.chat?.type,
+    from: msg.from?.id,
+    text_preview: text.slice(0, 80),
+  });
+
+  if (!msg.chat || msg.chat.id !== CLOSED_CHAT_ID) {
+    console.log(
+      "Skip: chat_id != CLOSED_CHAT_ID",
+      msg.chat?.id?.toString(),
+      "!=",
+      CLOSED_CHAT_ID.toString(),
+    );
+    return;
+  }
+
+  if (!text) {
+    console.log("Skip: no text/caption in message from closed chat");
+    return;
+  }
+
+  const phones = normalizePhones(text);
+  console.log("Phones found:", phones);
+
+  if (phones.length === 0) {
+    console.log("Skip: no phones in message");
+    return;
+  }
+
+  const sanitized = stripPhones(text);
+  const kb = new InlineKeyboard().text(
+    "Показать номер телефона",
+    buildPayload("PAY", phones),
+  );
+
+  try {
+    if (msg.text) {
+      await ctx.api.sendMessage(PUBLIC_CHANNEL_ID, sanitized, {
+        reply_markup: kb,
+      });
+      console.log("Sent text ad to public channel");
+    } else if (msg.photo && msg.photo.length > 0) {
+      const photo = msg.photo[msg.photo.length - 1];
+      await ctx.api.sendPhoto(PUBLIC_CHANNEL_ID, photo.file_id, {
+        caption: sanitized,
+        reply_markup: kb,
+      });
+      console.log("Sent photo ad to public channel");
+    } else {
+      console.log("Skip: unsupported message type in closed chat");
+    }
+  } catch (err) {
+    console.error("Error sending ad to public channel:", err);
+  }
+}
+
 let handleUpdate: (req: Request) => Promise<Response> | Response;
 
 if (envOk) {
@@ -73,68 +135,15 @@ if (envOk) {
 
   const bot = new Bot(token!);
 
-  // Логируем каждый апдейт с message
+  // Сообщения из групп / лички
   bot.on("message", async (ctx) => {
-    const msg = ctx.message;
-    if (!msg) return;
+    await handleAd(ctx.message, ctx, CLOSED_CHAT_ID, PUBLIC_CHANNEL_ID);
+  });
 
-    const txt = msg.text ?? msg.caption ?? "";
-    console.log("Incoming message:", {
-      chat_id: msg.chat.id.toString(),
-      chat_type: msg.chat.type,
-      from: msg.from?.id,
-      text_preview: txt.slice(0, 80),
-    });
-
-    if (msg.chat.id !== CLOSED_CHAT_ID) {
-      console.log(
-        "Skip message: chat_id != CLOSED_CHAT_ID",
-        msg.chat.id.toString(),
-        "!=",
-        CLOSED_CHAT_ID.toString(),
-      );
-      return;
-    }
-
-    const text = msg.text ?? msg.caption;
-    if (!text) {
-      console.log("Skip: no text/caption in message from closed chat");
-      return;
-    }
-
-    const phones = normalizePhones(text);
-    console.log("Phones found:", phones);
-
-    if (phones.length === 0) {
-      console.log("Skip: no phones in message");
-      return;
-    }
-
-    const sanitized = stripPhones(text);
-    const kb = new InlineKeyboard().text(
-      "Показать номер телефона",
-      buildPayload("PAY", phones),
-    );
-
-    try {
-      if (msg.text) {
-        await ctx.api.sendMessage(PUBLIC_CHANNEL_ID, sanitized, {
-          reply_markup: kb,
-        });
-        console.log("Sent text ad to public channel");
-      } else if (msg.photo && msg.photo.length > 0) {
-        const photo = msg.photo[msg.photo.length - 1];
-        await ctx.api.sendPhoto(PUBLIC_CHANNEL_ID, photo.file_id, {
-          caption: sanitized,
-          reply_markup: kb,
-        });
-        console.log("Sent photo ad to public channel");
-      } else {
-        console.log("Skip: unsupported message type in closed chat");
-      }
-    } catch (err) {
-      console.error("Error sending ad to public channel:", err);
-    }
+  // Посты из каналов (закрытый канал с объявлениями)
+  bot.on("channel_post", async (ctx) => {
+    // @ts-ignore grammy даёт channelPost на контексте
+    await handleAd(ctx.channelPost ?? ctx.update.channel_post, ctx, CLOSED_CHAT_ID, PUBLIC_CHANNEL_ID);
   });
 
   bot.on("callback_query:data", async (ctx) => {
@@ -207,6 +216,8 @@ if (envOk) {
 }
 
 Deno.serve(async (req: Request) => {
+  console.log("HTTP request:", req.method, new URL(req.url).pathname);
+
   if (req.method === "POST") {
     const url = new URL(req.url);
     if (url.pathname === "/") {

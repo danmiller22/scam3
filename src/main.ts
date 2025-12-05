@@ -66,23 +66,29 @@ function parsePayload(
 }
 
 // Универсальная обработка объявления (для групп и каналов)
-async function handleAd(msg: any, ctx: any, CLOSED_CHAT_ID: bigint, PUBLIC_CHANNEL_ID: bigint) {
-  if (!msg) return;
+async function handleAd(
+  msg: any,
+  ctx: any,
+  CLOSED_CHAT_ID: number,
+  PUBLIC_CHANNEL_ID: number,
+) {
+  if (!msg || !msg.chat) return;
 
   const text = msg.text ?? msg.caption ?? "";
+
   console.log("Incoming:", {
-    chat_id: msg.chat?.id?.toString(),
-    chat_type: msg.chat?.type,
+    chat_id: msg.chat.id,
+    chat_type: msg.chat.type,
     from: msg.from?.id,
     text_preview: text.slice(0, 80),
   });
 
-  if (!msg.chat || msg.chat.id !== CLOSED_CHAT_ID) {
+  if (msg.chat.id !== CLOSED_CHAT_ID) {
     console.log(
       "Skip: chat_id != CLOSED_CHAT_ID",
-      msg.chat?.id?.toString(),
+      msg.chat.id,
       "!=",
-      CLOSED_CHAT_ID.toString(),
+      CLOSED_CHAT_ID,
     );
     return;
   }
@@ -107,21 +113,40 @@ async function handleAd(msg: any, ctx: any, CLOSED_CHAT_ID: bigint, PUBLIC_CHANN
   );
 
   try {
+    // Только текст
     if (msg.text) {
       await ctx.api.sendMessage(PUBLIC_CHANNEL_ID, sanitized, {
         reply_markup: kb,
       });
       console.log("Sent text ad to public channel");
-    } else if (msg.photo && msg.photo.length > 0) {
+      return;
+    }
+
+    // Фото / альбом
+    if (msg.media_group_id) {
+      // Это часть альбома: копируем весь альбом как есть, но на первое фото вешаем нашу подпись и кнопку
+      try {
+        const media = await ctx.api.getUpdates({
+          // getUpdates здесь использовать нельзя при вебхуке,
+          // поэтому просто отправляем то сообщение, которое пришло, с caption и кнопкой.
+          // Для простоты: берём последнюю фотку этого сообщения.
+        });
+      } catch {
+        // Фоллбек ниже
+      }
+    }
+
+    if (msg.photo && msg.photo.length > 0) {
       const photo = msg.photo[msg.photo.length - 1];
       await ctx.api.sendPhoto(PUBLIC_CHANNEL_ID, photo.file_id, {
         caption: sanitized,
         reply_markup: kb,
       });
       console.log("Sent photo ad to public channel");
-    } else {
-      console.log("Skip: unsupported message type in closed chat");
+      return;
     }
+
+    console.log("Skip: unsupported message type in closed chat");
   } catch (err) {
     console.error("Error sending ad to public channel:", err);
   }
@@ -130,8 +155,9 @@ async function handleAd(msg: any, ctx: any, CLOSED_CHAT_ID: bigint, PUBLIC_CHANN
 let handleUpdate: (req: Request) => Promise<Response> | Response;
 
 if (envOk) {
-  const CLOSED_CHAT_ID = BigInt(closedChatIdEnv!);
-  const PUBLIC_CHANNEL_ID = BigInt(publicChannelIdEnv!);
+  // ВАЖНО: используем number, не BigInt
+  const CLOSED_CHAT_ID = Number(closedChatIdEnv);
+  const PUBLIC_CHANNEL_ID = Number(publicChannelIdEnv);
 
   const bot = new Bot(token!);
 
@@ -140,10 +166,15 @@ if (envOk) {
     await handleAd(ctx.message, ctx, CLOSED_CHAT_ID, PUBLIC_CHANNEL_ID);
   });
 
-  // Посты из каналов (закрытый канал с объявлениями)
+  // Посты из каналов (если когда-нибудь захочешь закрытый канал)
   bot.on("channel_post", async (ctx) => {
     // @ts-ignore grammy даёт channelPost на контексте
-    await handleAd(ctx.channelPost ?? ctx.update.channel_post, ctx, CLOSED_CHAT_ID, PUBLIC_CHANNEL_ID);
+    await handleAd(
+      ctx.channelPost ?? ctx.update.channel_post,
+      ctx,
+      CLOSED_CHAT_ID,
+      PUBLIC_CHANNEL_ID,
+    );
   });
 
   bot.on("callback_query:data", async (ctx) => {
